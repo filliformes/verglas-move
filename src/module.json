@@ -2,11 +2,12 @@
     "id": "verglas",
     "name": "Verglas",
     "abbrev": "VRGL",
-    "version": "1.2.2",
+    "version": "1.2.3",
     "description": "Mutable Instruments Clouds granular processor — granular, stretch, looper, and spectral modes for Ableton Move",
     "author": "Emilie Gillet (DSP) / fillioning (port)",
     "dsp": "verglas.so",
     "api_version": 2,
+    "component_type": "audio_fx",
     "capabilities": {
         "chainable": true,
         "component_type": "audio_fx",

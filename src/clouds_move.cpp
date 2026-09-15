@@ -420,6 +420,45 @@ static void clouds_process(void *instance, int16_t *audio_inout, int frames) {
     }
 }
 
+// ---- State persistence ----
+// Schwung saves a module by calling get_param("state") and expects a JSON
+// snapshot; it restores AFTER create_instance() via set_param("state", json).
+// On a successful JSON.parse the host RE-EMITS the state PRETTY-PRINTED
+// ("key": "value" with spaces/newlines after each colon) on the next save, so
+// the parser must be key-based and whitespace/newline-tolerant. Every user-
+// settable param must be listed here or it silently resets to its default on
+// reload. Momentary/navigation keys (_level, knob_*_adjust) are excluded.
+static const char *STATE_KEYS[] = {
+    "position", "size", "pitch", "density", "texture", "feedback",
+    "reverb", "dry_wet", "mode", "freeze", "quality", "stereo_spread",
+    "filter_hp", "filter_lp", "limiter_on", "limiter_pre", "limiter_post",
+    "low_boost", "low_freq", "low_q"
+};
+#define STATE_KEY_COUNT ((int)(sizeof(STATE_KEYS)/sizeof(STATE_KEYS[0])))
+
+// Extract the quoted string value for "key". Searches for the fully-quoted key
+// ("size" never matches inside "stereo_spread") and tolerates whitespace or
+// newlines after the colon, so a pretty-printed round-trip still parses.
+// Returns 0 on success (value copied into out), -1 if the key is absent.
+static int clouds_json_get_str(const char *json, const char *key,
+                               char *out, int out_len) {
+    char search[48];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    const char *p = strstr(json, search);
+    if (!p) return -1;
+    p += strlen(search);
+    while (*p == ':' || *p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (*p != '"') return -1;
+    p++;
+    const char *end = strchr(p, '"');
+    if (!end) return -1;
+    int len = (int)(end - p);
+    if (len >= out_len) len = out_len - 1;
+    memcpy(out, p, (size_t)len);
+    out[len] = '\0';
+    return 0;
+}
+
 static void clouds_set_param(void *instance, const char *key, const char *val) {
     CloudsInstance *inst = (CloudsInstance*)instance;
     if (!inst || !key || !val) return;
@@ -507,45 +546,16 @@ static void clouds_set_param(void *instance, const char *key, const char *val) {
             }
         }
     } else if (strcmp(key, "state") == 0) {
-        // JSON state restore
-        float pos = 0.5f, sz = 0.5f, dens = 1.0f, tex = 0.5f;
-        float fb = 0.0f, rev = 0.0f, dw = 0.5f, ss = 1.0f;
-        int pit = 0, md = 0, frz = 0, qual = 0;
-        float fhp = 0.0f, flp = 20000.0f;
-        int lim_on = 0; float lim_pre = 0.0f, lim_post = 0.0f;
-        float lb = 0.0f, lf = 100.0f, lq = 0.7f;
-        sscanf(val, "{\"position\":%f,\"size\":%f,\"pitch\":%d,"
-               "\"density\":%f,\"texture\":%f,\"feedback\":%f,"
-               "\"reverb\":%f,\"dry_wet\":%f,\"mode\":%d,"
-               "\"freeze\":%d,\"quality\":%d,\"stereo_spread\":%f,"
-               "\"filter_hp\":%f,\"filter_lp\":%f,"
-               "\"limiter_on\":%d,\"limiter_pre\":%f,\"limiter_post\":%f,"
-               "\"low_boost\":%f,\"low_freq\":%f,\"low_q\":%f}",
-               &pos, &sz, &pit, &dens, &tex, &fb, &rev, &dw,
-               &md, &frz, &qual, &ss,
-               &fhp, &flp,
-               &lim_on, &lim_pre, &lim_post,
-               &lb, &lf, &lq);
-        inst->position = clampf(pos, 0.0f, 1.0f);
-        inst->size = clampf(sz, 0.0f, 1.0f);
-        inst->pitch = clampi(pit, -24, 24);
-        inst->density = clampf(dens, 0.0f, 1.0f);
-        inst->texture = clampf(tex, 0.0f, 1.0f);
-        inst->feedback = clampf(fb, 0.0f, 1.0f);
-        inst->reverb = clampf(rev, 0.0f, 1.0f);
-        inst->dry_wet = clampf(dw, 0.0f, 1.0f);
-        inst->mode = clampi(md, 0, 3);
-        inst->freeze = (frz != 0);
-        inst->quality = clampi(qual, 0, 1);
-        inst->stereo_spread = clampf(ss, 0.0f, 1.0f);
-        inst->filter_hp = clampf(fhp, 0.0f, 1000.0f);
-        inst->filter_lp = clampf(flp, 1000.0f, 20000.0f);
-        inst->limiter_on = (lim_on != 0);
-        inst->limiter_pre = clampf(lim_pre, -6.0f, 6.0f);
-        inst->limiter_post = clampf(lim_post, -6.0f, 6.0f);
-        inst->low_boost = clampf(lb, 0.0f, 6.0f);
-        inst->low_freq = clampf(lf, 30.0f, 400.0f);
-        inst->low_q = clampf(lq, 0.1f, 4.0f);
+        // Key-based JSON restore: hand each key to the ordinary per-key handler
+        // above so clamping + enum/toggle matching are reused. Tolerates
+        // whitespace, newlines, reordering, and missing keys — a key that is
+        // absent simply leaves that param at its current value (never aborts
+        // the whole parse, unlike the old positional sscanf).
+        char vb[32];
+        for (int i = 0; i < STATE_KEY_COUNT; i++) {
+            if (clouds_json_get_str(val, STATE_KEYS[i], vb, sizeof(vb)) == 0)
+                clouds_set_param(instance, STATE_KEYS[i], vb);
+        }
     }
 }
 
@@ -693,21 +703,27 @@ static int clouds_get_param(void *instance, const char *key, char *buf, int buf_
         memcpy(buf, cp, len + 1);
         return len;
     } else if (strcmp(key, "state") == 0) {
-        return snprintf(buf, buf_len,
-            "{\"position\":%.3f,\"size\":%.3f,\"pitch\":%d,"
-            "\"density\":%.3f,\"texture\":%.3f,\"feedback\":%.3f,"
-            "\"reverb\":%.3f,\"dry_wet\":%.3f,\"mode\":%d,"
-            "\"freeze\":%d,\"quality\":%d,\"stereo_spread\":%.3f,"
-            "\"filter_hp\":%d,\"filter_lp\":%d,"
-            "\"limiter_on\":%d,\"limiter_pre\":%.1f,\"limiter_post\":%.1f,"
-            "\"low_boost\":%.1f,\"low_freq\":%d,\"low_q\":%.1f}",
-            inst->position, inst->size, inst->pitch,
-            inst->density, inst->texture, inst->feedback,
-            inst->reverb, inst->dry_wet, inst->mode,
-            inst->freeze ? 1 : 0, inst->quality, inst->stereo_spread,
-            (int)inst->filter_hp, (int)inst->filter_lp,
-            inst->limiter_on ? 1 : 0, inst->limiter_pre, inst->limiter_post,
-            inst->low_boost, (int)inst->low_freq, inst->low_q);
+        // Full snapshot for Schwung autosave / set reload. Every value is
+        // emitted as a QUOTED string (raw float text, integer, or the enum
+        // option name) using the same per-key getters that a live read uses,
+        // so it survives any pretty-printed re-serialization unchanged and
+        // feeds straight back into set_param via the state branch above.
+        if (buf_len < 2) return -1;
+        int n = 0;
+        buf[n++] = '{';
+        for (int i = 0; i < STATE_KEY_COUNT; i++) {
+            char vb[32];
+            if (clouds_get_param(instance, STATE_KEYS[i], vb, sizeof(vb)) < 0)
+                continue;
+            int w = snprintf(buf + n, (size_t)(buf_len - n), "%s\"%s\":\"%s\"",
+                             (n > 1) ? "," : "", STATE_KEYS[i], vb);
+            if (w < 0 || w >= buf_len - n) return -1;   // would overflow
+            n += w;
+        }
+        if (n + 1 >= buf_len) return -1;
+        buf[n++] = '}';
+        buf[n] = '\0';
+        return n;
     }
     return -1;
 }
@@ -729,7 +745,7 @@ extern "C" {
 __attribute__((visibility("default")))
 audio_fx_api_v2_t* move_audio_fx_init_v2(const host_api_v1_t *host) {
     g_host = host;
-    if (host && host->log) host->log("[verglas] Verglas (Clouds) v1.2.2 loaded");
+    if (host && host->log) host->log("[verglas] Verglas (Clouds) v1.2.3 loaded");
     return &g_api;
 }
 
