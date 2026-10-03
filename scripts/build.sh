@@ -29,6 +29,12 @@ SOURCES=(
     "$SRC_DIR/stmlib/dsp/atan.cc"
 )
 
+# -fno-gnu-unique: without it, static members of class templates (e.g.
+# stmlib::ShyFFT's bit_rev_256_lut_) are emitted as STB_GNU_UNIQUE symbols,
+# and glibc marks any DSO exporting one NODELETE: dlclose() never unmaps it,
+# so the module's memory is never freed and reloading after an update reuses
+# the old image instead of the new file.
+
 # Compile each source
 OBJECTS=()
 for src in "${SOURCES[@]}"; do
@@ -40,7 +46,7 @@ for src in "${SOURCES[@]}"; do
         -O2 -fPIC -ffast-math \
         -march=armv8-a -mtune=cortex-a72 \
         -fomit-frame-pointer -fno-stack-protector \
-        -fno-exceptions -fno-rtti \
+        -fno-exceptions -fno-rtti -fno-gnu-unique \
         -fno-tree-loop-distribute-patterns \
         -DNDEBUG -DTEST \
         -Wall -Wno-unused-variable -Wno-unused-but-set-variable
