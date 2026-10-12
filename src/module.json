@@ -2,7 +2,7 @@
     "id": "verglas",
     "name": "Verglas",
     "abbrev": "VRGL",
-    "version": "1.2.3",
+    "version": "1.2.4",
     "description": "Mutable Instruments Clouds granular processor — granular, stretch, looper, and spectral modes for Ableton Move",
     "author": "Emilie Gillet (DSP) / fillioning (port)",
     "dsp": "verglas.so",
@@ -41,20 +41,20 @@
                     "name": "Verglas",
                     "knobs": ["position", "size", "pitch", "density", "texture", "feedback", "reverb", "dry_wet"],
                     "params": [
-                        {"level": "Verglas", "label": "Verglas"},
-                        {"level": "Filters", "label": "Filters"}
+                        {"level": "Filters", "label": "Filters"},
+                        {"level": "Parameters", "label": "Parameters"}
                     ]
-                },
-                "Verglas": {
-                    "label": "Verglas",
-                    "knobs": ["position", "size", "pitch", "density", "texture", "feedback", "reverb", "dry_wet"],
-                    "params": ["position", "size", "pitch", "density", "texture", "feedback", "reverb", "dry_wet",
-                        "mode", "freeze", "quality", "stereo_spread"]
                 },
                 "Filters": {
                     "label": "Filters",
                     "knobs": ["filter_hp", "filter_lp", "limiter_on", "limiter_pre", "limiter_post", "low_boost", "low_freq", "low_q"],
                     "params": ["filter_hp", "filter_lp", "limiter_on", "limiter_pre", "limiter_post", "low_boost", "low_freq", "low_q"]
+                },
+                "Parameters": {
+                    "label": "Parameters",
+                    "knobs": ["position", "size", "pitch", "density", "texture", "feedback", "reverb", "dry_wet"],
+                    "params": ["position", "size", "pitch", "density", "texture", "feedback", "reverb", "dry_wet",
+                        "mode", "freeze", "quality", "stereo_spread"]
                 }
             }
         }

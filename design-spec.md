@@ -54,7 +54,8 @@ stereo int16 out.
 |------|------------------|------|
 | Sample rate | 32000 Hz | 44100 Hz |
 | Block size | 32 samples | 128 samples |
-| Large buffer | 118784 bytes | 163840 bytes |
+| Large buffer | 118784 bytes | 172032 bytes |
+| Reverb | 32kHz-tuned delays | Delays/LFOs scaled x1.378 (v1.2.4) |
 | Small buffer | 65408 bytes | 90112 bytes |
 | FFT | ARM CMSIS | shy_fft.h (portable) |
 | Platform | STM32F4 bare-metal | aarch64 Linux (.so) |
@@ -74,7 +75,7 @@ stereo int16 out.
 | Position | float | 0-1 | 0.5 | 0.01 | Grain start position in buffer |
 | Size | float | 0-1 | 0.5 | 0.01 | Grain size / stretch window / delay time |
 | Pitch | int | -24 to +24 | 0 | 1 | Semitone transposition |
-| Density | float | 0-1 | 0.5 | 0.01 | Grain density (meta-param: <0.5 deterministic, >0.5 overlap) |
+| Density | float | 0-1 | 1.0 | 0.01 | Grain density (meta-param: <0.5 deterministic, >0.5 overlap) |
 | Texture | float | 0-1 | 0.5 | 0.01 | Grain window shape / filter cutoff / spectral quantization |
 | Feedback | float | 0-1 | 0.0 | 0.01 | Feedback amount (HP-filtered to prevent DC buildup) |
 | Reverb | float | 0-1 | 0.0 | 0.01 | Post-reverb amount (Dattorro algorithm) |
@@ -86,7 +87,7 @@ stereo int16 out.
 | Mode | menu | Granular / Stretch / Looper / Spectral | Granular | Playback algorithm |
 | Freeze | toggle | OFF / ON | OFF | Locks recording buffer |
 | Quality | menu | 16-bit / Lo-Fi | 16-bit | Lo-Fi = 8-bit mu-law + 2x downsampled |
-| Spread | float | 0-1 | 0.5 | Stereo spread of grains |
+| Spread | float | 0-1 | 1.0 | Stereo spread of grains |
 
 ---
 
@@ -97,7 +98,7 @@ stereo int16 out.
 - No FTZ on ARM — `-ffast-math` required to flush denormals
 - No heap allocation in render path
 - No `printf` or logging in render path
-- Instance struct ~260KB (processor + two audio buffers) — allocated once via calloc
+- Instance struct ~270KB (processor + two audio buffers) — allocated once via calloc
 - Stack usage in render: 512 bytes (output buffer) — well within limits
 
 ---

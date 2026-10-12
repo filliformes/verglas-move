@@ -32,7 +32,8 @@ stereo int16 out.
 Source: `src/clouds/dsp/` adapted from pichenettes/eurorack. Key changes:
 - sample_rate: 32000→44100 in `granular_processor.h`
 - kMaxBlockSize: 32→128 in `frame.h`
-- Large buffer: 118784→163840 bytes (scaled for 44.1k, same recording time)
+- Large buffer: 118784→172032 bytes (scaled for 44.1k, same recording time; +8K FX workspace since v1.2.4 for the rescaled reverb)
+- Reverb (fx/reverb.h): delay lengths, modulation offsets and LFO rates scaled by 44100/32000; FxEngine 16384→32768 (v1.2.4)
 - Small buffer: 65408→90112 bytes
 - Spectral mode uses shy_fft.h (not ARM CMSIS)
 - Quality parameter: `set_quality(quality * 2)` — only stereo variants exposed
@@ -46,7 +47,7 @@ Source: `src/clouds/dsp/` adapted from pichenettes/eurorack. Key changes:
 | 1 | position      | Position | float  | 0-1      | 0.5     | 71  | 0.01 |
 | 2 | size          | Size     | float  | 0-1      | 0.5     | 72  | 0.01 |
 | 3 | pitch         | Pitch    | int    | -24-+24  | 0       | 73  | 1    |
-| 4 | density       | Density  | float  | 0-1      | 0.5     | 74  | 0.01 |
+| 4 | density       | Density  | float  | 0-1      | 1.0     | 74  | 0.01 |
 | 5 | texture       | Texture  | float  | 0-1      | 0.5     | 75  | 0.01 |
 | 6 | feedback      | Feedback | float  | 0-1      | 0       | 76  | 0.01 |
 | 7 | reverb        | Reverb   | float  | 0-1      | 0       | 77  | 0.01 |
@@ -54,7 +55,7 @@ Source: `src/clouds/dsp/` adapted from pichenettes/eurorack. Key changes:
 | J | mode          | Mode     | menu   | 0-3      | 0       | jog | 1    |
 | J | freeze        | Freeze   | toggle | 0-1      | 0       | jog | 1    |
 | J | quality       | Quality  | menu   | 0-1      | 0       | jog | 1    |
-| J | stereo_spread | Spread   | float  | 0-1      | 0.5     | jog | 0.01 |
+| J | stereo_spread | Spread   | float  | 0-1      | 1.0     | jog | 0.01 |
 
 CCs are **relative** (1-63=increment, 65-127=decrement). Pitch knob uses
 accelerated delta for fast semitone jumps. Mode wraps around 0-3.
@@ -92,7 +93,7 @@ UI value 1→`set_quality(2)` (stereo lo-fi / 8-bit mu-law + 2x downsampled).
 - No heap allocation in render path
 - No printf / logging in render path
 - Files on device must be owned by `ableton:users`
-- Instance struct ~260KB (processor + 163840 + 90112 byte buffers)
+- Instance struct ~270KB (processor + 172032 + 90112 byte buffers)
 
 ---
 
