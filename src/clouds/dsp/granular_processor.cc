@@ -422,7 +422,7 @@ void GranularProcessor::Prepare() {
 
     BufferAllocator allocator(workspace, workspace_size);
     diffuser_.Init(allocator.Allocate<float>(2048));
-    reverb_.Init(allocator.Allocate<uint16_t>(16384));
+    reverb_.Init(allocator.Allocate<uint16_t>(32768));  // Verglas: was 16384, see reverb.h
     
     size_t correlator_block_size = (kMaxWSOLASize / 32) + 2;
     uint32_t* correlator_data = allocator.Allocate<uint32_t>(

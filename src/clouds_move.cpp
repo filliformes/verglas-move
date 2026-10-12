@@ -43,6 +43,12 @@ typedef struct host_api_v1 {
     move_mod_emit_value_fn mod_emit_value;
     move_mod_clear_source_fn mod_clear_source;
     void *mod_host_ctx;
+    // Appended by newer hosts (unused here; listed so the layout matches).
+    float (*get_bpm)(void);
+    int (*midi_inject_to_move)(const uint8_t *msg, int len);
+    int (*slot_recv_channel)(void *instance);
+    double (*get_beat_position)(void);
+    void *reserved[8];
 } host_api_v1_t;
 
 typedef struct audio_fx_api_v2 {
@@ -58,7 +64,10 @@ typedef struct audio_fx_api_v2 {
 }  // extern "C"
 
 // ---- Buffer sizes scaled for 44.1k (original was 32k) ----
-static const size_t kLargeBufferSize = 163840;  // ~3.7s at 44.1k stereo 16-bit
+// Stereo recording uses kSmallBufferSize per channel; the rest of the large
+// buffer is FX workspace (diffuser 8K + reverb 64K + correlator 1.5K), so the
+// large buffer is small + 80K. Was 163840 before the reverb was rescaled.
+static const size_t kLargeBufferSize = 172032;
 static const size_t kSmallBufferSize = 90112;
 
 // ---- Instance state ----
@@ -111,7 +120,7 @@ struct CloudsInstance {
     // Smoothed parameter state
     float texture_smooth;  // one-pole smoothed texture (100ms)
 
-    // Page tracking (0=Verglas, 1=Filters)
+    // Page tracking (0=Parameters/root, 1=Filters)
     int current_page;
 };
 
@@ -328,9 +337,10 @@ static void clouds_process(void *instance, int16_t *audio_inout, int frames) {
 
     // Our own dry/wet crossfade (linear — unity at both extremes)
     // Compensate for Clouds' volume loss at non-zero pitch:
-    // grain shrinkage (up), spectral bin spreading (down), crossfade imbalance
+    // grain shrinkage (up), spectral bin spreading (down), crossfade imbalance.
+    // Capped at +6 dB: uncapped it reached +8.5 dB at 24 st and hard-clipped.
     float abs_pitch = fabsf((float)inst->pitch);
-    float pitch_comp = 1.0f + abs_pitch * 0.07f;  // ~7% per semitone
+    float pitch_comp = fminf(1.0f + abs_pitch * 0.07f, 2.0f);  // ~7% per semitone
     float mix = clampf(inst->dry_wet, 0.0f, 1.0f);
     float dry_gain = 1.0f - mix;
     float wet_gain = mix * pitch_comp;
@@ -466,7 +476,7 @@ static void clouds_set_param(void *instance, const char *key, const char *val) {
     /* Page tracking — Shadow UI sends _level when user navigates */
     if (strcmp(key, "_level") == 0) {
         if (strcmp(val, "Filters") == 0) inst->current_page = 1;
-        else inst->current_page = 0;  /* "Verglas" or root */
+        else inst->current_page = 0;  /* "Parameters" or root */
         return;
     }
 
@@ -572,16 +582,16 @@ static int clouds_get_param(void *instance, const char *key, char *buf, int buf_
           "\"root\":{\"name\":\"Verglas\","
             "\"knobs\":[\"position\",\"size\",\"pitch\",\"density\",\"texture\",\"feedback\",\"reverb\",\"dry_wet\"],"
             "\"params\":["
-              "{\"level\":\"Verglas\",\"label\":\"Verglas\"},"
-              "{\"level\":\"Filters\",\"label\":\"Filters\"}"
+              "{\"level\":\"Filters\",\"label\":\"Filters\"},"
+              "{\"level\":\"Parameters\",\"label\":\"Parameters\"}"
             "]},"
-          "\"Verglas\":{\"label\":\"Verglas\","
-            "\"knobs\":[\"position\",\"size\",\"pitch\",\"density\",\"texture\",\"feedback\",\"reverb\",\"dry_wet\"],"
-            "\"params\":[\"position\",\"size\",\"pitch\",\"density\",\"texture\",\"feedback\",\"reverb\",\"dry_wet\","
-              "\"mode\",\"freeze\",\"quality\",\"stereo_spread\"]},"
           "\"Filters\":{\"label\":\"Filters\","
             "\"knobs\":[\"filter_hp\",\"filter_lp\",\"limiter_on\",\"limiter_pre\",\"limiter_post\",\"low_boost\",\"low_freq\",\"low_q\"],"
-            "\"params\":[\"filter_hp\",\"filter_lp\",\"limiter_on\",\"limiter_pre\",\"limiter_post\",\"low_boost\",\"low_freq\",\"low_q\"]}"
+            "\"params\":[\"filter_hp\",\"filter_lp\",\"limiter_on\",\"limiter_pre\",\"limiter_post\",\"low_boost\",\"low_freq\",\"low_q\"]},"
+          "\"Parameters\":{\"label\":\"Parameters\","
+            "\"knobs\":[\"position\",\"size\",\"pitch\",\"density\",\"texture\",\"feedback\",\"reverb\",\"dry_wet\"],"
+            "\"params\":[\"position\",\"size\",\"pitch\",\"density\",\"texture\",\"feedback\",\"reverb\",\"dry_wet\","
+              "\"mode\",\"freeze\",\"quality\",\"stereo_spread\"]}"
         "}}";
         int len = (int)strlen(hier);
         if (len >= buf_len) return -1;
@@ -745,7 +755,7 @@ extern "C" {
 __attribute__((visibility("default")))
 audio_fx_api_v2_t* move_audio_fx_init_v2(const host_api_v1_t *host) {
     g_host = host;
-    if (host && host->log) host->log("[verglas] Verglas (Clouds) v1.2.3 loaded");
+    if (host && host->log) host->log("[verglas] Verglas (Clouds) v1.2.4 loaded");
     return &g_api;
 }
 

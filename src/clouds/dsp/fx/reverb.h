@@ -42,8 +42,11 @@ class Reverb {
   
   void Init(uint16_t* buffer) {
     engine_.Init(buffer);
-    engine_.SetLFOFrequency(LFO_1, 0.5f / 32000.0f);
-    engine_.SetLFOFrequency(LFO_2, 0.3f / 32000.0f);
+    // Verglas: Clouds runs at 44.1kHz on Move (32kHz on the module). The LFO
+    // rates and every delay length below are scaled by 44100/32000 so the
+    // reverb keeps the original decay times and shimmer rate.
+    engine_.SetLFOFrequency(LFO_1, 0.5f / 44100.0f);
+    engine_.SetLFOFrequency(LFO_2, 0.3f / 44100.0f);
     lp_ = 0.7f;
     diffusion_ = 0.625f;
   }
@@ -53,16 +56,17 @@ class Reverb {
     // (4 AP diffusers on the input, then a loop of 2x 2AP+1Delay).
     // Modulation is applied in the loop of the first diffuser AP for additional
     // smearing; and to the two long delays for a slow shimmer/chorus effect.
-    typedef E::Reserve<113,
-      E::Reserve<162,
-      E::Reserve<241,
-      E::Reserve<399,
-      E::Reserve<1653,
-      E::Reserve<2038,
-      E::Reserve<3411,
-      E::Reserve<1913,
-      E::Reserve<1663,
-      E::Reserve<4782> > > > > > > > > > Memory;
+    // Original (32kHz): 113, 162, 241, 399, 1653, 2038, 3411, 1913, 1663, 4782
+    typedef E::Reserve<156,
+      E::Reserve<223,
+      E::Reserve<332,
+      E::Reserve<550,
+      E::Reserve<2278,
+      E::Reserve<2809,
+      E::Reserve<4701,
+      E::Reserve<2636,
+      E::Reserve<2292,
+      E::Reserve<6590> > > > > > > > > > Memory;
     E::DelayLine<Memory, 0> ap1;
     E::DelayLine<Memory, 1> ap2;
     E::DelayLine<Memory, 2> ap3;
@@ -90,8 +94,8 @@ class Reverb {
       engine_.Start(&c);
       
       // Smear AP1 inside the loop.
-      c.Interpolate(ap1, 10.0f, LFO_1, 60.0f, 1.0f);
-      c.Write(ap1, 100, 0.0f);
+      c.Interpolate(ap1, 14.0f, LFO_1, 83.0f, 1.0f);  // was 10, 60
+      c.Write(ap1, 138, 0.0f);  // was 100
       
       c.Read(in_out->l + in_out->r, gain);
 
@@ -108,7 +112,7 @@ class Reverb {
       
       // Main reverb loop.
       c.Load(apout);
-      c.Interpolate(del2, 4680.0f, LFO_2, 100.0f, krt);
+      c.Interpolate(del2, 6450.0f, LFO_2, 138.0f, krt);  // was 4680, 100
       c.Lp(lp_1, klp);
       c.Read(dap1a TAIL, -kap);
       c.WriteAllPass(dap1a, kap);
@@ -160,7 +164,7 @@ class Reverb {
   }
   
  private:
-  typedef FxEngine<16384, FORMAT_12_BIT> E;
+  typedef FxEngine<32768, FORMAT_12_BIT> E;  // was 16384 (scaled lines need 22567)
   E engine_;
   
   float amount_;

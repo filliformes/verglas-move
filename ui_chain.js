@@ -27,7 +27,20 @@ const KNOB_CC_BASE = 71;
 
 const PAGES = [
     {
-        name: "Verglas",
+        name: "Filters",
+        params: [
+            { key: "filter_hp",    name: "HPF",       min: 0,    max: 1000,  step: 10, fmt: v => v < 1 ? "OFF" : `${Math.round(v)} Hz` },
+            { key: "filter_lp",    name: "LPF",       min: 1000, max: 20000, step: 10, fmt: v => v > 19999 ? "OFF" : `${Math.round(v)} Hz` },
+            { key: "limiter_on",   name: "Limiter",   min: 0,    max: 1,     step: 1,  enum: ["Off", "On"] },
+            { key: "limiter_pre",  name: "Pre Gain",  min: -6,   max: 6,     step: 0.5, fmt: v => `${v >= 0 ? "+" : ""}${v.toFixed(1)} dB` },
+            { key: "limiter_post", name: "Post Gain", min: -6,   max: 6,     step: 0.5, fmt: v => `${v >= 0 ? "+" : ""}${v.toFixed(1)} dB` },
+            { key: "low_boost",    name: "Low Boost",  min: 0,   max: 6,     step: 0.5, fmt: v => v < 0.1 ? "OFF" : `+${v.toFixed(1)} dB` },
+            { key: "low_freq",     name: "Low Freq",   min: 30,  max: 400,   step: 10,  fmt: v => `${Math.round(v)} Hz` },
+            { key: "low_q",        name: "Low Q",      min: 0.1, max: 4.0,   step: 0.1, fmt: v => v.toFixed(1) }
+        ]
+    },
+    {
+        name: "Parameters",
         params: [
             { key: "position", name: "Position", min: 0,   max: 1,  step: 0.01, fmt: v => `${(v*100).toFixed(0)}%` },
             { key: "size",     name: "Size",     min: 0,   max: 1,  step: 0.01, fmt: v => `${(v*100).toFixed(0)}%` },
@@ -42,25 +55,12 @@ const PAGES = [
             { key: "quality",  name: "Quality",  min: 0,   max: 1,  step: 1,    enum: ["16-bit", "Lo-Fi"] },
             { key: "stereo_spread", name: "Spread", min: 0, max: 1, step: 0.01, fmt: v => `${(v*100).toFixed(0)}%` }
         ]
-    },
-    {
-        name: "Filters",
-        params: [
-            { key: "filter_hp",    name: "HPF",       min: 0,    max: 1000,  step: 10, fmt: v => v < 1 ? "OFF" : `${Math.round(v)} Hz` },
-            { key: "filter_lp",    name: "LPF",       min: 1000, max: 20000, step: 10, fmt: v => v > 19999 ? "OFF" : `${Math.round(v)} Hz` },
-            { key: "limiter_on",   name: "Limiter",   min: 0,    max: 1,     step: 1,  enum: ["Off", "On"] },
-            { key: "limiter_pre",  name: "Pre Gain",  min: -6,   max: 6,     step: 0.5, fmt: v => `${v >= 0 ? "+" : ""}${v.toFixed(1)} dB` },
-            { key: "limiter_post", name: "Post Gain", min: -6,   max: 6,     step: 0.5, fmt: v => `${v >= 0 ? "+" : ""}${v.toFixed(1)} dB` },
-            { key: "low_boost",    name: "Low Boost",  min: 0,   max: 6,     step: 0.5, fmt: v => v < 0.1 ? "OFF" : `+${v.toFixed(1)} dB` },
-            { key: "low_freq",     name: "Low Freq",   min: 30,  max: 400,   step: 10,  fmt: v => `${Math.round(v)} Hz` },
-            { key: "low_q",        name: "Low Q",      min: 0.1, max: 4.0,   step: 0.1, fmt: v => v.toFixed(1) }
-        ]
     }
 ];
 
 /* ============================================ State == */
 
-let selectedPage = 0;
+let selectedPage = 1;  /* Parameters (listed after Filters) */
 let insidePage = false;
 let selectedParam = 0;
 let editMode = false;
