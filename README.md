@@ -26,9 +26,17 @@ Available from the Move Everything Module Store on your device, or manually:
 | 7 | Reverb | 0–100% |
 | 8 | Mix | 0–100% |
 
-Additional parameters (jog menu): Mode, Freeze, Quality, Spread, HPF, LPF, Low-Shelf EQ (Boost/Freq/Q), Limiter, Pre Gain, Post Gain.
+Additional pages: **Filters** (HPF, LPF, Limiter, Pre Gain, Post Gain, Low Boost, Low Freq, Low Q) and **Parameters** (the main knobs plus Mode, Freeze, Quality, Spread).
 
 See [MANUAL.md](MANUAL.md) for full documentation.
+
+## What's New in v1.2.5
+
+- **Fixed** loud passages hard-clipping before the Limiter (the output stage now runs in float and clamps once)
+- **Fixed** clicks when engaging HPF, LPF, Limiter or Low Boost, and zipper noise on Pre/Post Gain
+- **Fixed** CPU spikes from denormals on decaying tails (flush-to-zero during processing)
+- **Changed** pages, labels and units now come only from module.json (Schwung 1.x knob grid); the old jog-menu UI is gone
+- **Added** native test suite, run on every build and release
 
 ## What's New in v1.1.0
 

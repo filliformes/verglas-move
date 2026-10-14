@@ -53,7 +53,6 @@ $CC -shared -o "$OUT_DIR/verglas.so" "${OBJECTS[@]}" -lm
 
 # Copy module files
 cp "$PROJECT_DIR/module.json" "$OUT_DIR/"
-cp "$PROJECT_DIR/ui_chain.js" "$OUT_DIR/"
 if [ -f "$SRC_DIR/help.json" ]; then
     cp "$SRC_DIR/help.json" "$OUT_DIR/"
 fi

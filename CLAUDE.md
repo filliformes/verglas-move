@@ -67,22 +67,24 @@ UI value 1→`set_quality(2)` (stereo lo-fi / 8-bit mu-law + 2x downsampled).
 
 ## Critical implementation notes (never violate)
 - **Quality encoding**: `set_quality(quality * 2)` — the 2-bit field is (bit1=lofi, bit0=mono). We always keep bit0=0 for stereo.
-- **Denormals**: compile with `-ffast-math` — ARM has no FTZ
+- **Denormals**: `-ffast-math` alone does NOT enable FTZ for a shared library on ARM; `process_block` sets FPCR.FZ (DenormalGuard)
 - **No heap in render**: all buffers in instance struct, allocated once via calloc
-- **No printf in render**: use `g_host->log()` only in init/create
+- **No logging at all**: every entry point (create, init, process, set/get_param) runs on the audio callback, `host->log` included
 - **calloc + Init()**: instance allocated with calloc, then `processor.Init()` called. Do not add constructors with side effects.
 - **Prepare() before Process()**: must call `Prepare()` every block — handles mode changes, buffer reallocation, vocoder buffering
 - **Separate output buffer**: `Process(input, output, size)` reads from input at the end for dry/wet mix — do not modify input before Process completes
 - **Relative CC accumulation**: `val = (cc_data < 64) ? cc_data : cc_data - 128` then accumulate
-- **Knob overlay**: `knob_N_adjust/name/value` pattern is REQUIRED — Shadow UI calls DSP directly
+- **No knob overlay**: Schwung >= 1.0 never sends `_level` / `knob_N_*` to an audio FX (slot-level chain-host keys). Pages, labels and units come from module.json; `get_param("chain_params"/"ui_hierarchy")` returns -1 so the host reads module.json
+- **Output stage in float, clamp once**: mix -> low shelf -> HPF -> LPF -> limiter, then int16. No stage is ever bypassed (HPF fades in over its first 5 Hz, LPF off = 1.0 coefficient, limiter crossfades 10 ms), all controls smoothed — no clicks on engage
 
 ---
 
-## Jog wheel menu (ui_chain.js)
-- Jog rotate: navigate 12 parameters
-- Jog click: enter edit mode → rotate adjusts value → click confirms
-- Display: mode name, quality, freeze status, current param name + value
-- Knobs 1-8 (CC 71-78) → direct control of first 8 params
+## Pages (Schwung knob grid, from module.json ui_hierarchy)
+- Main knobs: Position, Size, Pitch, Density, Texture, Feedback, Reverb, Mix
+- Filters: HPF, LPF, Limiter, Pre Gain, Post Gain, Low Boost, Low Freq, Low Q
+- Parameters: the 8 main knobs + Mode, Freeze, Quality, Spread
+- Serving a ui_hierarchy means the host never loads a module `ui_chain.js`;
+  Verglas no longer ships one (removed in v1.2.5).
 
 ---
 
@@ -133,7 +135,7 @@ resources.cc, phase_vocoder.cc, stft.cc, frame_transformation.cc, units.cc
 - `src/clouds/drivers/debug_pin.h` — stub (no debug pins on Move)
 - `src/stmlib/` — adapted stmlib (from Rings port + shy_fft.h, buffer_allocator.h, atan.h, rsqrt.h)
 - `module.json` — module metadata
-- `ui_chain.js` — Shadow UI (jog menu + knob handling)
+- `tests/test_verglas.cpp` — native tests (`scripts/test.sh`, run by the Dockerfile and CI)
 - `design-spec.md` — authoritative design record
 - `scripts/build.sh` — Docker ARM64 cross-compile
 - `scripts/install.sh` — deploy via SSH + fix ownership

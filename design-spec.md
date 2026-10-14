@@ -81,7 +81,7 @@ stereo int16 out.
 | Reverb | float | 0-1 | 0.0 | 0.01 | Post-reverb amount (Dattorro algorithm) |
 | Mix | float | 0-1 | 0.5 | 0.01 | Dry/wet crossfade (LUT-based equal-power) |
 
-### Jog-wheel only (navigable via jog menu)
+### Parameters page (Schwung knob grid)
 | Name | Type | Range/Options | Default | Notes |
 |------|------|---------------|---------|-------|
 | Mode | menu | Granular / Stretch / Looper / Spectral | Granular | Playback algorithm |

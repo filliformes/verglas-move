@@ -3,6 +3,12 @@
 //
 // Wraps Clouds GranularProcessor into Schwung audio_fx_api_v2 interface.
 // Audio: 44100 Hz, 128 frames/block, stereo interleaved int16.
+//
+// Knob pages, labels and units come from module.json (chain_params +
+// ui_hierarchy). Schwung >= 1.0 reads and writes params by key and never sends
+// _level or knob_N_* to an audio FX, so there is no knob-overlay layer here.
+// The output stage (mix, low shelf, HPF/LPF, limiter) runs in float and is
+// clamped to int16 once, at the very end.
 
 #include <cstdlib>
 #include <cstring>
@@ -120,55 +126,24 @@ struct CloudsInstance {
     // Smoothed parameter state
     float texture_smooth;  // one-pole smoothed texture (100ms)
 
-    // Page tracking (0=Parameters/root, 1=Filters)
-    int current_page;
+    // Output stage, smoothed once per block / ramped per sample so no control
+    // ever jumps (and no stage is ever bypassed, so none restarts from stale
+    // state when it engages).
+    float hp_s, lp_s;                 // cutoffs (Hz)
+    float boost_s, freq_s, q_s;       // low shelf
+    float pre_s, post_s;              // limiter gains (dB)
+    float pre_gain, post_gain;        // linear, per-sample ramps
+    float limiter_mix;                // 0 = bypass, 1 = limited
+    float dry_gain, wet_gain;         // per-sample ramps
 };
 
 static const host_api_v1_t *g_host = NULL;
 
-// ---- Knob mapping (1-indexed knobs → parameter keys) ----
+// ---- Enum option names ----
 static const char *MODE_NAMES[] = {
     "Granular", "Stretch", "Looper", "Spectral"
 };
 static const char *QUALITY_NAMES[] = { "16-bit", "Lo-Fi" };
-
-struct KnobDef {
-    const char *key;
-    const char *label;
-    float min, max, step;
-    bool is_int;
-};
-
-static const KnobDef KNOB_MAP[8] = {
-    { "position", "Position", 0,   1,  0.01f, false },
-    { "size",     "Size",     0,   1,  0.01f, false },
-    { "pitch",    "Pitch",    -24, 24, 1,     true  },
-    { "density",  "Density",  0,   1,  0.01f, false },
-    { "texture",  "Texture",  0,   1,  0.01f, false },
-    { "feedback", "Feedback", 0,   1,  0.01f, false },
-    { "reverb",   "Reverb",   0,   1,  0.01f, false },
-    { "dry_wet",  "Mix",      0,   1,  0.01f, false },
-};
-
-static float* clouds_param_ptr(CloudsInstance *inst, int knob_idx) {
-    switch (knob_idx) {
-        case 0: return &inst->position;
-        case 1: return &inst->size;
-        case 3: return &inst->density;
-        case 4: return &inst->texture;
-        case 5: return &inst->feedback;
-        case 6: return &inst->reverb;
-        case 7: return &inst->dry_wet;
-        default: return NULL;
-    }
-}
-
-static int* clouds_int_param_ptr(CloudsInstance *inst, int knob_idx) {
-    switch (knob_idx) {
-        case 2: return &inst->pitch;
-        default: return NULL;
-    }
-}
 
 // ---- Helpers ----
 static inline float clampf(float x, float lo, float hi) {
@@ -210,20 +185,20 @@ static inline float tape_soft_clip(float x) {
 }
 
 // Low-shelf biquad coefficient update (Audio EQ Cookbook)
-static void update_low_shelf_coeffs(CloudsInstance *inst) {
-    if (inst->low_boost == inst->ls_last_boost &&
-        inst->low_freq  == inst->ls_last_freq  &&
-        inst->low_q     == inst->ls_last_q) return;
+static void update_low_shelf_coeffs(CloudsInstance *inst, float boost, float freq, float q) {
+    if (boost == inst->ls_last_boost &&
+        freq  == inst->ls_last_freq  &&
+        q     == inst->ls_last_q) return;
 
-    inst->ls_last_boost = inst->low_boost;
-    inst->ls_last_freq  = inst->low_freq;
-    inst->ls_last_q     = inst->low_q;
+    inst->ls_last_boost = boost;
+    inst->ls_last_freq  = freq;
+    inst->ls_last_q     = q;
 
-    float A = powf(10.0f, inst->low_boost * 0.025f);  // 10^(dB/40)
-    float w0 = 6.2831853f * inst->low_freq / 44100.0f;
+    float A = powf(10.0f, boost * 0.025f);  // 10^(dB/40); 0 dB = unity
+    float w0 = 6.2831853f * freq / 44100.0f;
     float cosw0 = cosf(w0);
     float sinw0 = sinf(w0);
-    float alpha = sinw0 / (2.0f * inst->low_q);
+    float alpha = sinw0 / (2.0f * q);
     float sqrtA2alpha = 2.0f * sqrtf(A) * alpha;
 
     float a0 = (A + 1.0f) + (A - 1.0f) * cosw0 + sqrtA2alpha;
@@ -235,8 +210,28 @@ static void update_low_shelf_coeffs(CloudsInstance *inst) {
     inst->ls_a2 = ((A + 1.0f) + (A - 1.0f) * cosw0 - sqrtA2alpha)     * inv_a0;
 }
 
+// ARM has no flush-to-zero by default, and -ffast-math only enables it for
+// executables (crtfastmath), not for a shared library. Set FPCR.FZ for the
+// duration of the block so decaying reverb / filter / feedback tails never
+// produce denormals.
+struct DenormalGuard {
+#if defined(__aarch64__)
+    uint64_t saved;
+    DenormalGuard() {
+        __asm__ __volatile__("mrs %0, fpcr" : "=r"(saved));
+        uint64_t fz = saved | (1ull << 24);
+        __asm__ __volatile__("msr fpcr, %0" : : "r"(fz));
+    }
+    ~DenormalGuard() {
+        __asm__ __volatile__("msr fpcr, %0" : : "r"(saved));
+    }
+#endif
+};
+
 // ---- API callbacks ----
 static void* clouds_create(const char *module_dir, const char *config_json) {
+    (void)module_dir;
+    (void)config_json;  // state is restored later through set_param("state")
     CloudsInstance *inst = (CloudsInstance*)calloc(1, sizeof(CloudsInstance));
     if (!inst) return NULL;
 
@@ -277,10 +272,21 @@ static void* clouds_create(const char *module_dir, const char *config_json) {
     inst->limiter_pre = 0.0f;
     inst->limiter_post = 0.0f;
 
+    inst->hp_s = inst->filter_hp;
+    inst->lp_s = inst->filter_lp;
+    inst->boost_s = inst->low_boost;
+    inst->freq_s = inst->low_freq;
+    inst->q_s = inst->low_q;
+    inst->pre_s = inst->post_s = 0.0f;
+    inst->pre_gain = inst->post_gain = 1.0f;
+    inst->limiter_mix = 0.0f;
+    inst->dry_gain = 1.0f - inst->dry_wet;
+    inst->wet_gain = inst->dry_wet;
+    update_low_shelf_coeffs(inst, inst->boost_s, inst->freq_s, inst->q_s);
+
     inst->processor.set_playback_mode(clouds::PLAYBACK_MODE_GRANULAR);
     inst->processor.set_quality(inst->quality * 2);  // 0=stereo 16-bit, 2=stereo lo-fi
 
-    if (g_host && g_host->log) g_host->log("[verglas] instance created");
     return inst;
 }
 
@@ -295,6 +301,8 @@ static void clouds_process(void *instance, int16_t *audio_inout, int frames) {
     CloudsInstance *inst = (CloudsInstance*)instance;
     if (!inst || frames <= 0) return;
     if (frames > 128) frames = 128;
+
+    DenormalGuard denormal_guard;
 
     // Update processor settings
     inst->processor.set_playback_mode(
@@ -335,97 +343,92 @@ static void clouds_process(void *instance, int16_t *audio_inout, int frames) {
     clouds::ShortFrame output[128];
     inst->processor.Process(input, output, (size_t)frames);
 
-    // Our own dry/wet crossfade (linear — unity at both extremes)
-    // Compensate for Clouds' volume loss at non-zero pitch:
-    // grain shrinkage (up), spectral bin spreading (down), crossfade imbalance.
-    // Capped at +6 dB: uncapped it reached +8.5 dB at 24 st and hard-clipped.
-    float abs_pitch = fabsf((float)inst->pitch);
-    float pitch_comp = fminf(1.0f + abs_pitch * 0.07f, 2.0f);  // ~7% per semitone
-    float mix = clampf(inst->dry_wet, 0.0f, 1.0f);
-    float dry_gain = 1.0f - mix;
-    float wet_gain = mix * pitch_comp;
-    for (int i = 0; i < frames * 2; ++i) {
-        float d = (float)dry_buf[i];
-        float w = (float)((int16_t*)output)[i];
-        int32_t s = (int32_t)(d * dry_gain + w * wet_gain);
-        if (s > 32767) s = 32767; if (s < -32768) s = -32768;
-        audio_inout[i] = (int16_t)s;
-    }
+    // Output stage, all in float, clamped to int16 once at the end (the old
+    // chain clamped after the mix, so loud passages hard-clipped before the
+    // limiter could round them off).
+    //
+    // Dry/wet is linear (unity at both extremes). The wet side compensates
+    // Clouds' volume loss at non-zero pitch (grain shrinkage up, spectral bin
+    // spreading down, crossfade imbalance), capped at +6 dB.
+    const float abs_pitch = fabsf((float)inst->pitch);
+    const float pitch_comp = fminf(1.0f + abs_pitch * 0.07f, 2.0f);
+    const float mix = clampf(inst->dry_wet, 0.0f, 1.0f);
+    const float inv_frames = 1.0f / (float)frames;
+    const float dry_step = ((1.0f - mix) - inst->dry_gain) * inv_frames;
+    const float wet_step = (mix * pitch_comp - inst->wet_gain) * inv_frames;
 
-    // Low-shelf EQ (biquad, before HPF/LPF)
-    bool do_ls = (inst->low_boost > 0.05f);
-    if (do_ls) {
-        update_low_shelf_coeffs(inst);
-        for (int i = 0; i < frames; ++i) {
-            // Left channel — Direct Form II Transposed
-            float xl = (float)audio_inout[i * 2] / 32768.0f;
-            float yl = inst->ls_b0 * xl + inst->ls_z1_l;
-            inst->ls_z1_l = inst->ls_b1 * xl - inst->ls_a1 * yl + inst->ls_z2_l;
-            inst->ls_z2_l = inst->ls_b2 * xl - inst->ls_a2 * yl;
-            // Right channel
-            float xr = (float)audio_inout[i * 2 + 1] / 32768.0f;
-            float yr = inst->ls_b0 * xr + inst->ls_z1_r;
-            inst->ls_z1_r = inst->ls_b1 * xr - inst->ls_a1 * yr + inst->ls_z2_r;
-            inst->ls_z2_r = inst->ls_b2 * xr - inst->ls_a2 * yr;
-            // Write back
-            int32_t ol = (int32_t)(yl * 32767.0f);
-            int32_t or_ = (int32_t)(yr * 32767.0f);
-            if (ol > 32767) ol = 32767; if (ol < -32768) ol = -32768;
-            if (or_ > 32767) or_ = 32767; if (or_ < -32768) or_ = -32768;
-            audio_inout[i * 2]     = (int16_t)ol;
-            audio_inout[i * 2 + 1] = (int16_t)or_;
+    // Block-rate smoothing (~10 ms) of the Filters page.
+    const float k = 0.25f;
+    inst->hp_s += k * (inst->filter_hp - inst->hp_s);
+    inst->lp_s += k * (inst->filter_lp - inst->lp_s);
+    inst->boost_s += k * (inst->low_boost - inst->boost_s);
+    inst->freq_s += k * (inst->low_freq - inst->freq_s);
+    inst->q_s += k * (inst->low_q - inst->q_s);
+    inst->pre_s += k * (inst->limiter_pre - inst->pre_s);
+    inst->post_s += k * (inst->limiter_post - inst->post_s);
+    update_low_shelf_coeffs(inst, inst->boost_s, inst->freq_s, inst->q_s);
+
+    // MI ONE_POLE coefficients: 1 - exp(-2*pi*f/sr). The HPF state always
+    // tracks (at 5 Hz when off) and its subtraction fades in over the first
+    // 5 Hz, so "off" is bit-transparent and engaging never starts from a
+    // stale state. "LPF off" passes straight through.
+    const float sr = 44100.0f;
+    const float hp_coeff = 1.0f - expf(-6.2831853f * fmaxf(inst->hp_s, 5.0f) / sr);
+    const float hp_amount = clampf(inst->hp_s / 5.0f, 0.0f, 1.0f);
+    const float lp_coeff = inst->lp_s >= 19999.0f
+        ? 1.0f : 1.0f - expf(-6.2831853f * inst->lp_s / sr);
+    const float pre_step = (db_to_lin(inst->pre_s) - inst->pre_gain) * inv_frames;
+    const float post_step = (db_to_lin(inst->post_s) - inst->post_gain) * inv_frames;
+    const float lim_target = inst->limiter_on ? 1.0f : 0.0f;
+    const float lim_step = 1.0f / (0.01f * sr);  // 10 ms crossfade
+
+    const int16_t *wet16 = (const int16_t *)output;
+    for (int i = 0; i < frames; ++i) {
+        inst->dry_gain += dry_step;
+        inst->wet_gain += wet_step;
+        inst->pre_gain += pre_step;
+        inst->post_gain += post_step;
+        float lm = inst->limiter_mix;
+        lm = lm < lim_target ? fminf(lm + lim_step, lim_target) : fmaxf(lm - lim_step, lim_target);
+        inst->limiter_mix = lm;
+
+        float x[2];
+        for (int c = 0; c < 2; ++c) {
+            float d = (float)dry_buf[2 * i + c] / 32768.0f;
+            float w = (float)wet16[2 * i + c] / 32768.0f;
+            x[c] = d * inst->dry_gain + w * inst->wet_gain;
         }
-    }
 
-    // One-pole filters + tape limiter (post-Clouds, in float domain)
-    // Mutable Instruments ONE_POLE: state += coeff * (input - state)
-    // Coefficient: 1 - exp(-2*pi*f/sr)
-    bool do_hp = (inst->filter_hp > 1.0f);
-    bool do_lp = (inst->filter_lp < 19999.0f);
-    bool do_lim = inst->limiter_on;
+        // Low shelf (biquad, Direct Form II Transposed): unity at 0 dB.
+        float y = inst->ls_b0 * x[0] + inst->ls_z1_l;
+        inst->ls_z1_l = inst->ls_b1 * x[0] - inst->ls_a1 * y + inst->ls_z2_l;
+        inst->ls_z2_l = inst->ls_b2 * x[0] - inst->ls_a2 * y;
+        x[0] = y;
+        y = inst->ls_b0 * x[1] + inst->ls_z1_r;
+        inst->ls_z1_r = inst->ls_b1 * x[1] - inst->ls_a1 * y + inst->ls_z2_r;
+        inst->ls_z2_r = inst->ls_b2 * x[1] - inst->ls_a2 * y;
+        x[1] = y;
 
-    if (do_hp || do_lp || do_lim) {
-        const float sr = 44100.0f;
-        float hp_coeff = do_hp ? (1.0f - expf(-6.2831853f * inst->filter_hp / sr)) : 0.0f;
-        float lp_coeff = do_lp ? (1.0f - expf(-6.2831853f * inst->filter_lp / sr)) : 1.0f;
-        float pre = do_lim ? db_to_lin(inst->limiter_pre) : 1.0f;
-        float post = do_lim ? db_to_lin(inst->limiter_post) : 1.0f;
+        // HPF: state tracks a low-pass, output = input - state.
+        inst->hp_state_l += hp_coeff * (x[0] - inst->hp_state_l);
+        x[0] -= hp_amount * inst->hp_state_l;
+        inst->hp_state_r += hp_coeff * (x[1] - inst->hp_state_r);
+        x[1] -= hp_amount * inst->hp_state_r;
 
-        for (int i = 0; i < frames; ++i) {
-            float l = (float)audio_inout[i * 2]     / 32768.0f;
-            float r = (float)audio_inout[i * 2 + 1] / 32768.0f;
+        // LPF.
+        inst->lp_state_l += lp_coeff * (x[0] - inst->lp_state_l);
+        x[0] = inst->lp_state_l;
+        inst->lp_state_r += lp_coeff * (x[1] - inst->lp_state_r);
+        x[1] = inst->lp_state_r;
 
-            // HPF: state tracks lowpass, output = input - state
-            if (do_hp) {
-                inst->hp_state_l += hp_coeff * (l - inst->hp_state_l);
-                l -= inst->hp_state_l;
-                inst->hp_state_r += hp_coeff * (r - inst->hp_state_r);
-                r -= inst->hp_state_r;
+        for (int c = 0; c < 2; ++c) {
+            float v = x[c];
+            if (lm > 0.0f) {
+                float limited = tape_soft_clip(v * inst->pre_gain) * inst->post_gain;
+                v += (limited - v) * lm;
             }
-
-            // LPF: state tracks lowpass, output = state
-            if (do_lp) {
-                inst->lp_state_l += lp_coeff * (l - inst->lp_state_l);
-                l = inst->lp_state_l;
-                inst->lp_state_r += lp_coeff * (r - inst->lp_state_r);
-                r = inst->lp_state_r;
-            }
-
-            // Tape limiter
-            if (do_lim) {
-                l *= pre; r *= pre;
-                l = tape_soft_clip(l);
-                r = tape_soft_clip(r);
-                l *= post; r *= post;
-            }
-
-            // Convert back to int16 with saturation
-            int32_t ol = (int32_t)(l * 32767.0f);
-            int32_t or_ = (int32_t)(r * 32767.0f);
-            if (ol > 32767) ol = 32767; if (ol < -32768) ol = -32768;
-            if (or_ > 32767) or_ = 32767; if (or_ < -32768) or_ = -32768;
-            audio_inout[i * 2]     = (int16_t)ol;
-            audio_inout[i * 2 + 1] = (int16_t)or_;
+            int32_t o = (int32_t)lrintf(clampf(v, -1.0f, 1.0f) * 32767.0f);
+            audio_inout[2 * i + c] = (int16_t)o;
         }
     }
 }
@@ -437,7 +440,7 @@ static void clouds_process(void *instance, int16_t *audio_inout, int frames) {
 // ("key": "value" with spaces/newlines after each colon) on the next save, so
 // the parser must be key-based and whitespace/newline-tolerant. Every user-
 // settable param must be listed here or it silently resets to its default on
-// reload. Momentary/navigation keys (_level, knob_*_adjust) are excluded.
+// reload.
 static const char *STATE_KEYS[] = {
     "position", "size", "pitch", "density", "texture", "feedback",
     "reverb", "dry_wet", "mode", "freeze", "quality", "stereo_spread",
@@ -472,13 +475,6 @@ static int clouds_json_get_str(const char *json, const char *key,
 static void clouds_set_param(void *instance, const char *key, const char *val) {
     CloudsInstance *inst = (CloudsInstance*)instance;
     if (!inst || !key || !val) return;
-
-    /* Page tracking — Shadow UI sends _level when user navigates */
-    if (strcmp(key, "_level") == 0) {
-        if (strcmp(val, "Filters") == 0) inst->current_page = 1;
-        else inst->current_page = 0;  /* "Parameters" or root */
-        return;
-    }
 
     if (strcmp(key, "position") == 0) {
         inst->position = clampf(atof(val), 0.0f, 1.0f);
@@ -526,35 +522,6 @@ static void clouds_set_param(void *instance, const char *key, const char *val) {
         inst->limiter_pre = clampf(atof(val), -6.0f, 6.0f);
     } else if (strcmp(key, "limiter_post") == 0) {
         inst->limiter_post = clampf(atof(val), -6.0f, 6.0f);
-    } else if (strncmp(key, "knob_", 5) == 0 && strstr(key, "_adjust")) {
-        int knob_num = atoi(key + 5);  // 1-indexed
-        int delta = atoi(val);
-        if (inst->current_page == 1) {
-            /* Filters page */
-            switch (knob_num) {
-                case 1: inst->filter_hp = clampf(inst->filter_hp + delta * 10.0f, 0.0f, 1000.0f); break;
-                case 2: inst->filter_lp = clampf(inst->filter_lp + delta * 10.0f, 1000.0f, 20000.0f); break;
-                case 3: inst->limiter_on = (delta != 0) ? !inst->limiter_on : inst->limiter_on; break;
-                case 4: inst->limiter_pre = clampf(inst->limiter_pre + delta * 0.5f, -6.0f, 6.0f); break;
-                case 5: inst->limiter_post = clampf(inst->limiter_post + delta * 0.5f, -6.0f, 6.0f); break;
-                case 6: inst->low_boost = clampf(inst->low_boost + delta * 0.5f, 0.0f, 6.0f); break;
-                case 7: inst->low_freq = clampf(inst->low_freq + delta * 10.0f, 30.0f, 400.0f); break;
-                case 8: inst->low_q = clampf(inst->low_q + delta * 0.1f, 0.1f, 4.0f); break;
-            }
-        } else {
-            /* Verglas page */
-            int idx = knob_num - 1;
-            if (idx >= 0 && idx < 8) {
-                const KnobDef &k = KNOB_MAP[idx];
-                if (k.is_int) {
-                    int *p = clouds_int_param_ptr(inst, idx);
-                    if (p) *p = clampi(*p + delta * (int)k.step, (int)k.min, (int)k.max);
-                } else {
-                    float *p = clouds_param_ptr(inst, idx);
-                    if (p) *p = clampf(*p + delta * k.step, k.min, k.max);
-                }
-            }
-        }
     } else if (strcmp(key, "state") == 0) {
         // Key-based JSON restore: hand each key to the ordinary per-key handler
         // above so clamping + enum/toggle matching are reused. Tolerates
@@ -575,28 +542,9 @@ static int clouds_get_param(void *instance, const char *key, char *buf, int buf_
 
     if (strcmp(key, "name") == 0) {
         return snprintf(buf, buf_len, "Verglas");
-    } else if (strcmp(key, "ui_hierarchy") == 0) {
-        static const char *hier =
-        "{\"modes\":null,"
-        "\"levels\":{"
-          "\"root\":{\"name\":\"Verglas\","
-            "\"knobs\":[\"position\",\"size\",\"pitch\",\"density\",\"texture\",\"feedback\",\"reverb\",\"dry_wet\"],"
-            "\"params\":["
-              "{\"level\":\"Filters\",\"label\":\"Filters\"},"
-              "{\"level\":\"Parameters\",\"label\":\"Parameters\"}"
-            "]},"
-          "\"Filters\":{\"label\":\"Filters\","
-            "\"knobs\":[\"filter_hp\",\"filter_lp\",\"limiter_on\",\"limiter_pre\",\"limiter_post\",\"low_boost\",\"low_freq\",\"low_q\"],"
-            "\"params\":[\"filter_hp\",\"filter_lp\",\"limiter_on\",\"limiter_pre\",\"limiter_post\",\"low_boost\",\"low_freq\",\"low_q\"]},"
-          "\"Parameters\":{\"label\":\"Parameters\","
-            "\"knobs\":[\"position\",\"size\",\"pitch\",\"density\",\"texture\",\"feedback\",\"reverb\",\"dry_wet\"],"
-            "\"params\":[\"position\",\"size\",\"pitch\",\"density\",\"texture\",\"feedback\",\"reverb\",\"dry_wet\","
-              "\"mode\",\"freeze\",\"quality\",\"stereo_spread\"]}"
-        "}}";
-        int len = (int)strlen(hier);
-        if (len >= buf_len) return -1;
-        memcpy(buf, hier, len + 1);
-        return len;
+    } else if (strcmp(key, "ui_hierarchy") == 0 || strcmp(key, "chain_params") == 0) {
+        // Single source of truth: module.json (the host falls back to it).
+        return -1;
     } else if (strcmp(key, "position") == 0) {
         return snprintf(buf, buf_len, "%.4f", inst->position);
     } else if (strcmp(key, "size") == 0) {
@@ -637,81 +585,6 @@ static int clouds_get_param(void *instance, const char *key, char *buf, int buf_
         return snprintf(buf, buf_len, "%.4f", (double)inst->limiter_pre);
     } else if (strcmp(key, "limiter_post") == 0) {
         return snprintf(buf, buf_len, "%.4f", (double)inst->limiter_post);
-    } else if (strncmp(key, "knob_", 5) == 0 && strstr(key, "_name")) {
-        int knob_num = atoi(key + 5);
-        if (inst->current_page == 1) {
-            switch (knob_num) {
-                case 1: return snprintf(buf, buf_len, "HPF");
-                case 2: return snprintf(buf, buf_len, "LPF");
-                case 3: return snprintf(buf, buf_len, "Limiter");
-                case 4: return snprintf(buf, buf_len, "Pre Gain");
-                case 5: return snprintf(buf, buf_len, "Post Gain");
-                case 6: return snprintf(buf, buf_len, "Low Boost");
-                case 7: return snprintf(buf, buf_len, "Low Freq");
-                case 8: return snprintf(buf, buf_len, "Low Q");
-            }
-        } else {
-            int idx = knob_num - 1;
-            if (idx >= 0 && idx < 8)
-                return snprintf(buf, buf_len, "%s", KNOB_MAP[idx].label);
-        }
-        return 0;
-    } else if (strncmp(key, "knob_", 5) == 0 && strstr(key, "_value")) {
-        int knob_num = atoi(key + 5);
-        if (inst->current_page == 1) {
-            switch (knob_num) {
-                case 1: return snprintf(buf, buf_len, "%.0f Hz", inst->filter_hp);
-                case 2: return snprintf(buf, buf_len, "%.0f Hz", inst->filter_lp);
-                case 3: return snprintf(buf, buf_len, "%s", inst->limiter_on ? "On" : "Off");
-                case 4: return snprintf(buf, buf_len, "%+.1f dB", inst->limiter_pre);
-                case 5: return snprintf(buf, buf_len, "%+.1f dB", inst->limiter_post);
-                case 6: return snprintf(buf, buf_len, "+%.1f dB", inst->low_boost);
-                case 7: return snprintf(buf, buf_len, "%d Hz", (int)inst->low_freq);
-                case 8: return snprintf(buf, buf_len, "%.1f", inst->low_q);
-            }
-        } else {
-            int idx = knob_num - 1;
-            if (idx < 0 || idx >= 8) return 0;
-            switch (idx) {
-                case 0: return snprintf(buf, buf_len, "%d%%", (int)(inst->position * 100.0f));
-                case 1: return snprintf(buf, buf_len, "%d%%", (int)(inst->size * 100.0f));
-                case 2: return snprintf(buf, buf_len, "%+d st", inst->pitch);
-                case 3: return snprintf(buf, buf_len, "%d%%", (int)(inst->density * 100.0f));
-                case 4: return snprintf(buf, buf_len, "%d%%", (int)(inst->texture * 100.0f));
-                case 5: return snprintf(buf, buf_len, "%d%%", (int)(inst->feedback * 100.0f));
-                case 6: return snprintf(buf, buf_len, "%d%%", (int)(inst->reverb * 100.0f));
-                case 7: return snprintf(buf, buf_len, "%d%%", (int)(inst->dry_wet * 100.0f));
-            }
-        }
-        return 0;
-    } else if (strcmp(key, "chain_params") == 0) {
-        static const char *cp =
-        "["
-        "{\"key\":\"position\",\"name\":\"Position\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-        "{\"key\":\"size\",\"name\":\"Size\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-        "{\"key\":\"pitch\",\"name\":\"Pitch\",\"type\":\"int\",\"min\":-24,\"max\":24,\"step\":1},"
-        "{\"key\":\"density\",\"name\":\"Density\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-        "{\"key\":\"texture\",\"name\":\"Texture\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-        "{\"key\":\"feedback\",\"name\":\"Feedback\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-        "{\"key\":\"reverb\",\"name\":\"Reverb\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-        "{\"key\":\"dry_wet\",\"name\":\"Mix\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-        "{\"key\":\"mode\",\"name\":\"Mode\",\"type\":\"enum\",\"options\":[\"Granular\",\"Stretch\",\"Looper\",\"Spectral\"]},"
-        "{\"key\":\"freeze\",\"name\":\"Freeze\",\"type\":\"enum\",\"options\":[\"Off\",\"On\"]},"
-        "{\"key\":\"quality\",\"name\":\"Quality\",\"type\":\"enum\",\"options\":[\"16-bit\",\"Lo-Fi\"]},"
-        "{\"key\":\"stereo_spread\",\"name\":\"Spread\",\"type\":\"float\",\"min\":0,\"max\":1,\"step\":0.01},"
-        "{\"key\":\"filter_hp\",\"name\":\"HPF\",\"type\":\"int\",\"min\":0,\"max\":1000,\"step\":10},"
-        "{\"key\":\"filter_lp\",\"name\":\"LPF\",\"type\":\"int\",\"min\":1000,\"max\":20000,\"step\":10},"
-        "{\"key\":\"limiter_on\",\"name\":\"Limiter\",\"type\":\"enum\",\"options\":[\"Off\",\"On\"]},"
-        "{\"key\":\"limiter_pre\",\"name\":\"Pre Gain\",\"type\":\"float\",\"min\":-6,\"max\":6,\"step\":0.5},"
-        "{\"key\":\"limiter_post\",\"name\":\"Post Gain\",\"type\":\"float\",\"min\":-6,\"max\":6,\"step\":0.5},"
-        "{\"key\":\"low_boost\",\"name\":\"Low Boost\",\"type\":\"float\",\"min\":0,\"max\":6,\"step\":0.5},"
-        "{\"key\":\"low_freq\",\"name\":\"Low Freq\",\"type\":\"int\",\"min\":30,\"max\":400,\"step\":10},"
-        "{\"key\":\"low_q\",\"name\":\"Low Q\",\"type\":\"float\",\"min\":0.1,\"max\":4.0,\"step\":0.1}"
-        "]";
-        int len = (int)strlen(cp);
-        if (len >= buf_len) return -1;
-        memcpy(buf, cp, len + 1);
-        return len;
     } else if (strcmp(key, "state") == 0) {
         // Full snapshot for Schwung autosave / set reload. Every value is
         // emitted as a QUOTED string (raw float text, integer, or the enum
@@ -755,7 +628,6 @@ extern "C" {
 __attribute__((visibility("default")))
 audio_fx_api_v2_t* move_audio_fx_init_v2(const host_api_v1_t *host) {
     g_host = host;
-    if (host && host->log) host->log("[verglas] Verglas (Clouds) v1.2.4 loaded");
     return &g_api;
 }
 

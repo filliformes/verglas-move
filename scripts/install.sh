@@ -13,7 +13,8 @@ fi
 echo "Installing Verglas to $MOVE_IP..."
 DEST="/data/UserData/schwung/modules/audio_fx/verglas"
 ssh root@$MOVE_IP "mkdir -p $DEST"
-scp "$MODULE_DIR/verglas.so" "$MODULE_DIR/module.json" "$MODULE_DIR/ui_chain.js" root@$MOVE_IP:$DEST/
+scp "$MODULE_DIR/verglas.so" "$MODULE_DIR/module.json" root@$MOVE_IP:$DEST/
+ssh root@$MOVE_IP "rm -f $DEST/ui_chain.js"
 if [ -f "$MODULE_DIR/help.json" ]; then
     scp "$MODULE_DIR/help.json" root@$MOVE_IP:$DEST/
 fi
