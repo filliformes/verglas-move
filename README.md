@@ -50,7 +50,7 @@ See [MANUAL.md](MANUAL.md) for full documentation.
 
 - **DSP**: Emilie Gillet / [Mutable Instruments](https://github.com/pichenettes/eurorack) (MIT License)
 - **Soft clipper**: Inspired by [Chowdhury DSP](https://github.com/Chowdhury-DSP) and [Airwindows](https://github.com/airwindows/airwindows)
-- **Move port**: fillioning
+- **Move port**: filliformes
 - **Framework**: [Move Everything](https://github.com/charlesvestal/move-everything)
 
 ## License
